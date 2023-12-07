@@ -9,8 +9,6 @@
 # library(raster)
 # library(lutz) # time zone calculations
 
-`%>%` <- dplyr::`%>%` # add dplyr pipe
-
 #' Get the time zone for an observation with a latitude and longitude
 #'
 #' @param lon_obs longitude of observation in decimal degrees (°)
@@ -18,11 +16,15 @@
 #'
 #' @return the local standard time zone in the format "Etc/GMT+X"
 #' where X is the offset in hours from GMT
+#' @importFrom lutz tz_lookup_coords
+#' @importFrom dplyr left_join `%>%`
 #'
 #' @examples
+#' \dontrun{
 #' lon = -120
 #' lat = 40
 #' get_tz(lon, lat)
+#' }
 get_tz <- function(lon_obs, lat_obs){
   # Make the timezone table
   tz_table <- make_tz_table()
@@ -44,7 +46,9 @@ get_tz <- function(lon_obs, lat_obs){
 #' Build a table of timezones and offsets when called from get_tz
 #'
 #' @return A table of PST, MST, CST, and EST timezones
-#'
+#' @importFrom lutz tz_list
+#' @importFrom dplyr filter mutate `%>%`
+#' @export
 make_tz_table <- function(){
 
   # TODO: only support 4 time zones currently
@@ -56,10 +60,215 @@ make_tz_table <- function(){
     dplyr::mutate(timezone_lst = paste0("Etc/GMT+", (utc_offset_h * (-1))))
 }
 
+#' Get elevation based on lat/lon
+#'
+#' @return Elevation based on location
+#' @importFrom lutz tz_list
+#' @importFrom terra rast extract
+#' @export
 get_elev <- function(lon_obs, lat_obs){
   locs = cbind(lon_obs, lat_obs)
   r = terra::rast("/vsicurl/https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/USGS_Seamless_DEM_13.vrt")
   terra::extract(r, locs) %>% as.numeric()
+}
+
+#' Geolocate location to assign ecoregion 3 association
+#'
+#' @return Ecoregion level 3
+#' @importFrom sf st_as_sf sf_use_s2 st_intersection st_drop_geometry
+#' @importFrom dplyr select `%>%`
+#' @examples
+#' \dontrun{
+#' lon = -105
+#' lat = 40
+#' ecoregion3 <- get_eco_level3(lon, lat)
+#' }
+get_eco_level3 <- function(lon_obs, lat_obs){
+
+  locs = sf::st_as_sf(data.frame(lon_obs, lat_obs),
+                          coords = c("lon_obs", "lat_obs"), crs = 4326)
+
+ suppressMessages(suppressWarnings({
+
+   sf::sf_use_s2(FALSE)
+
+   sf::st_intersection(locs, ecoregions_states) %>%
+     dplyr::select("Ecoregion" = US_L3NAME) %>%
+     sf::st_drop_geometry() %>%
+     as.character()
+
+ }))
+
+}
+
+#' Geolocate location to assign ecoregion 4 association
+#'
+#' @return Ecoregion level 4
+#' @importFrom sf st_as_sf sf_use_s2 st_intersection st_drop_geometry
+#' @importFrom dplyr select `%>%`
+#' @examples
+#' \dontrun{
+#' lon = -105
+#' lat = 40
+#' ecoregion4 <- get_eco_level4(lon, lat)
+#' }
+get_eco_level4 <- function(lon_obs, lat_obs) {
+
+  locs = sf::st_as_sf(data.frame(lon_obs, lat_obs),
+                      coords = c("lon_obs", "lat_obs"), crs = 4326)
+
+  suppressMessages(suppressWarnings({
+
+    sf::sf_use_s2(FALSE)
+
+    sf::st_intersection(locs, ecoregions_states) %>%
+      dplyr::select("Ecoregion" = US_L4NAME) %>%
+      sf::st_drop_geometry() %>%
+      as.character()
+
+  }))
+
+}
+
+#' Geolocate location to assign state association
+#'
+#' @return State
+#' @importFrom sf st_as_sf sf_use_s2 st_intersection st_drop_geometry
+#' @importFrom dplyr select `%>%`
+#' @examples
+#' \dontrun{
+#' lon = -105
+#' lat = 40
+#' state <- get_state(lon, lat)
+#' }
+get_state <- function(lon_obs, lat_obs){
+
+  locs = sf::st_as_sf(data.frame(lon_obs, lat_obs),
+                      coords = c("lon_obs", "lat_obs"), crs = 4326)
+
+  suppressMessages(suppressWarnings({
+
+    sf::sf_use_s2(FALSE)
+
+    sf::st_intersection(locs, ecoregions_states) %>%
+      dplyr::select("State" = STATE_NAME) %>%
+      sf::st_drop_geometry() %>%
+      as.character()
+
+
+  }))
+
+}
+
+#' Download GPM IMERG data
+#'
+#' @param datetime_utc Observation time
+#' @param lon_obs Longitude in decimal degrees
+#' @param lat_obs Latitude in decimal degrees
+#'
+#' @return a dataframe of GPM data for each observation
+#' @importFrom sf st_as_sf st_drop_geometry
+#' @importFrom dplyr mutate any_of select bind_rows select `%>%`
+#' @importFrom plyr round_any
+#' @importFrom pacman p_load
+#' @importFrom glue glue
+#' @importFrom climateR dap
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#' datetime_utc = as.POSIXct("2023-01-01 16:00:00", tz = "UTC")
+#' lon = -105
+#' lat = 40
+#' gpm <- get_imerg(datetime_utc, lon_obs = lon, lat_obs = lat)
+#' }
+get_imerg <- function(datetime_utc,
+                      lon_obs,
+                      lat_obs){
+
+  # Assign GPM variable
+  var = 'probabilityLiquidPrecipitation'
+
+  # Observation data is converted into shapefile format
+  data = sf::st_as_sf(data.frame(datetime_utc, lon_obs, lat_obs),
+                      coords = c("lon_obs", "lat_obs"), crs = 4326)
+
+  # URL structure
+  base         = 'https://gpm1.gesdisc.eosdis.nasa.gov/opendap/hyrax/GPM_L3/GPM_3IMERGHHL.06'
+  product      = '3B-HHR-L.MS.MRG.3IMERG'
+  url_pattern  = '{base}/{year}/{julian}/{product}.{year}{month}{day}-S{hour}{minTime}00-E{hour}{nasa_time_minute}{nasa_time_second}.{min}.V06B.HDF5'
+  url_pattern2 = '{base}/{year}/{julian}/{product}.{year}{month}{day}-S{hour}{minTime}00-E{hour}{nasa_time_minute}{nasa_time_second}.{min}.V06C.HDF5'
+  url_pattern3 = '{base}/{year}/{julian}/{product}.{year}{month}{day}-S{hour}{minTime}00-E{hour}{nasa_time_minute}{nasa_time_second}.{min}.V06D.HDF5'
+
+  l = list()
+
+  ## Build URLs
+  data = data %>%
+    dplyr::mutate(dateTime = as.POSIXct(datetime_utc)) %>%
+    dplyr::mutate(
+      julian  = format(dateTime, "%j"),
+      year    = format(dateTime, "%Y"),
+      month   = format(dateTime, "%m"),
+      day     = format(dateTime, "%d"),
+      hour    = sprintf("%02s", format(dateTime, "%H")),
+      minTime = sprintf("%02s", plyr::round_any(as.numeric(
+        format(dateTime, "%M")
+      ), 30, f = floor)),
+      origin_time  = as.POSIXct(paste0(format(
+        dateTime, "%Y-%m-%d"
+      ), "00:00"), tz = "UTC"),
+      rounded_time = as.POSIXct(paste0(
+        format(dateTime, "%Y-%m-%d"), hour, ":", minTime
+      ), tz = "UTC"),
+      nasa_time = rounded_time + (29 * 60) + 59,
+      nasa_time_minute = format(nasa_time, "%M"),
+      nasa_time_second = format(nasa_time, "%S"),
+      min = sprintf("%04s", difftime(rounded_time, origin_time,  units = 'min')),
+      url = glue::glue(url_pattern),
+      url2 = glue::glue(url_pattern2),
+      url3 = glue::glue(url_pattern3)
+    ) %>%
+    # !! ADD ANYTHING YOU WANT TO KEEP HERE !!
+    dplyr::select(dplyr::any_of(c('datetime_utc', 'phase', 'url', 'url2', 'url3')))
+
+
+  ## Get Data
+  suppressMessages(
+  for (x in 1:nrow(data)) {
+    l[[x]] = tryCatch({
+      climateR::dap(
+          URL = data$url[x],
+          varname = var,
+          AOI = data[x, ],
+          verbose = FALSE
+      )
+    }, error = function(e) {
+      climateR::dap(
+        URL = data$url2[x],
+        varname = var,
+        AOI = data[x, ],
+        verbose = FALSE
+      )
+    }, error = function(e) {
+      climateR::dap(
+        URL = data$url3[x],
+        varname = var,
+        AOI = data[x, ],
+        verbose = FALSE
+      )
+      })
+  }
+  )
+
+  gpm_obs = cbind(data, dplyr::bind_rows(l))
+
+  # Return the dataframe
+  gpm_obs = gpm_obs %>%
+    sf::st_drop_geometry() %>% # drop geometry column to make it dataframe
+    dplyr::select('probabilityLiquidPrecipitation')
+
+  return(gpm_obs)
+
 }
 
 # # Import the citizen science data
